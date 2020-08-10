@@ -1,0 +1,13 @@
+[package]
+name = "pydistrib_cli"
+version = "0.1.0"
+authors = ["Rayan Hatout <rayan.hatout@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+[[bin]]
+name = "pydistrib_cli"
+path = "main.rs"

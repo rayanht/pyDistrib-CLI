@@ -4,12 +4,13 @@ extern crate fstrings;
 extern crate lazy_static;
 extern crate socket2;
 
-use std::io;
+use std::{io};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use uuid::Uuid;
+use std::process::exit;
 
 pub const PORT: u16 = 5007;
 lazy_static! {
@@ -26,7 +27,7 @@ fn new_socket(addr: &SocketAddr) -> io::Result<Socket> {
 
     let socket = Socket::new(domain, Type::dgram(), Some(Protocol::udp()))?;
 
-    socket.set_read_timeout(Some(Duration::from_secs(30)))?;
+    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
 
     Ok(socket)
 }
@@ -67,9 +68,24 @@ fn subscribe_to_multicast(addr: SocketAddr) -> io::Result<UdpSocket> {
 }
 
 fn main() {
+    let max_retries = 5;
     let worker_id = Uuid::new_v4();
+    println!("Initialising worker {}", worker_id);
 
-    println!("Booting worker id {}", worker_id);
+    let mut retries = 1;
+    while establish_connection(worker_id).is_none() {
+        if retries >= max_retries {
+            println!("Exceeded max retries. Aborting.");
+            exit(1)
+        }
+
+        println!("Connection attempt failed ({}/{})", retries, max_retries);
+        retries += 1;
+    }
+}
+
+fn establish_connection(worker_id: Uuid) -> Option<SocketAddr> {
+
     let multicast_socket = SocketAddr::new(*IPV4, PORT);
 
     // TODO ipv6
@@ -79,45 +95,56 @@ fn main() {
     let listener =
         subscribe_to_multicast(multicast_socket).expect("Failed to create listener socket");
 
-    let mut buf = [0u8; 128];
+    let mut buf = [0u8; 20];
+    
+    match listener.recv_from(&mut buf) {
+        Ok((len, remote_addr)) => {
+            let data = &buf[..len];
+            let decoded_data = String::from_utf8_lossy(data);
 
-    loop {
-        match listener.recv_from(&mut buf) {
-            Ok((len, remote_addr)) => {
-                let data = &buf[..len];
-                let decoded_data = String::from_utf8_lossy(data);
+            if &decoded_data[..14] == "PyDistrib INIT" {
+                let handshake_address = SocketAddr::new(
+                    remote_addr.ip(),
+                    *&decoded_data[15..].trim().parse::<u16>().unwrap(),
+                );
 
-                if &decoded_data[..14] == "PyDistrib INIT" {
-                    let handshake_address = SocketAddr::new(
-                        remote_addr.ip(),
-                        *&decoded_data[15..].trim().parse::<u16>().unwrap(),
-                    );
+                println!("Server located at {}", handshake_address);
 
-                    let payload = f!("PyDistrib HANDSHAKE|{worker_id}");
-                    handshake_socket
-                        .send_to(payload.as_bytes(), handshake_address)
-                        .expect("Failed to handshake");
+                let payload = f!("PyDistrib HANDSHAKE|{worker_id}");
+                handshake_socket
+                    .send_to(payload.as_bytes(), handshake_address)
+                    .expect("Failed to handshake");
 
-                    match handshake_socket.recv_from(&mut buf) {
-                        Ok((len, remote_addr)) => {
-                            let data = &buf[..len];
-                            let decoded_data = String::from_utf8_lossy(data);
-                            let expected_data = f!("PyDistrib HANDSHAKE ACK|{worker_id}");
-
-                            if decoded_data.trim() == expected_data
-                                && remote_addr.ip() == handshake_address.ip()
-                            {
-                                println!("Server acknowledged the handshake");
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Err(err) => {
-                println!("Worker error: {}", err);
+                if expect_server_ack(&handshake_socket, handshake_address, worker_id) {
+                    return Some(handshake_address);
+                };
             }
         }
+        _ => return None,
     }
+    
+    return None;
+}
+
+fn expect_server_ack(
+    handshake_socket: &UdpSocket,
+    handshake_address: SocketAddr,
+    worker_id: Uuid,
+) -> bool {
+    let mut buf = [0u8; 128];
+
+    match handshake_socket.recv_from(&mut buf) {
+        Ok((len, remote_addr)) => {
+            let data = &buf[..len];
+            let decoded_data = String::from_utf8_lossy(data);
+            let expected_data = f!("PyDistrib HANDSHAKE ACK|{worker_id}");
+
+            if decoded_data.trim() == expected_data && remote_addr.ip() == handshake_address.ip() {
+                return true;
+            }
+        }
+        _ => return false,
+    }
+
+    return false;
 }
